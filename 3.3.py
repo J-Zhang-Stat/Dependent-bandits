@@ -1,11 +1,27 @@
+import os
+import pickle
+import logging
 import random
 import numpy as np
 import math
 import matplotlib.pyplot as plt
 from collections import defaultdict
-from tqdm import tqdm
 
+from tqdm import tqdm
 import torch
+
+# Set up experiment logging directory
+experiment_name = 'ckucb_experiment_10k'
+log_dir = os.path.join('runs', experiment_name)
+os.makedirs(log_dir, exist_ok=True)
+# Configure logging to file
+logging.basicConfig(
+    filename=os.path.join(log_dir, 'log.txt'),
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logging.info(f"Starting experiment {experiment_name}")
 
 class HeterogeneousCluster:
     """
@@ -74,7 +90,6 @@ class HeterogeneousClusterEnvironment:
     def regret_per_action(self):
 
         payoffs = [c.payoff() for c in self.clusters]
-        print(f"payoffs:{payoffs}")
         best    = np.max([np.max(p) for p in payoffs])
         delta   = [best - p for p in payoffs]
         return delta
@@ -270,6 +285,10 @@ class ClusteredKernelUCB:
         self.sigma = sigma
         self.delta = delta
         self.n_arms = len(contexts)
+        # set up GPU device and mixed-precision context tensor
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # keep a half-precision tensor of all contexts on GPU
+        self.contexts_tensor = torch.tensor(self.contexts, device=self.device, dtype=torch.bfloat16)
 
         self._kernel = self._gaussian_kernel  # Use Gaussian kernel by default
         
@@ -302,55 +321,69 @@ class ClusteredKernelUCB:
             if cur_cluster != prev_c:
                 # only update when cluster changes
                 prev_c = cur_cluster
-                #print(f"Processing arm {i} in cluster {self.clusters[i]} at time {t}")
                 c = cur_cluster
-                X_c = np.array(self.cluster_data[c]['X'])
-                r_c = np.array(self.cluster_data[c]['r'])
-                n_c = len(r_c)
+                X_c_np = np.array(self.cluster_data[c]['X'])            # (n_c, d) on CPU
+                r_c_np = np.array(self.cluster_data[c]['r'])            # (n_c,) on CPU
+                n_c = len(r_c_np)
+                if n_c > 0:
+                    # prepare data on GPU
+                    X_c = torch.tensor(X_c_np, device=self.device, dtype=torch.float32)  # (n_c,d)
+                    r_c = torch.tensor(r_c_np, device=self.device, dtype=torch.float32).unsqueeze(1)  # (n_c,1)
 
-                #print(f"Cluster {c} at time {t}: n_c={n_c}, contexts={X_c.shape}, rewards={r_c.shape}")
+                    # compute Gaussian kernel matrix on GPU
+                    diff = X_c.unsqueeze(1) - X_c.unsqueeze(0)  # (n_c,n_c,d)
+                    K_c = torch.exp(-diff.pow(2).sum(-1) / (2 * self.gamma**2))  # (n_c,n_c)
+                    G_c = K_c + self.lambda_ * torch.eye(n_c, device=self.device)  # regularized Gram
 
-                # Build Gram matrix K_c and regularized G_c = K_c + λ I
-                K_c = np.array([[self._kernel(x1, x2) for x2 in X_c] for x1 in X_c])
-                G_c = K_c + self.lambda_ * np.eye(n_c)
-                #G_inv = np.linalg.inv(G_c)  # TODO: better inversion method, such as: Cholesky decomposition, newtons method
-                G_tensor = torch.tensor(G_c, dtype=torch.float64)
-                #G_inv_tensor = torch.inverse(G_tensor)
-                G_inv_tensor = torch.cholesky_inverse(torch.cholesky(G_tensor))
-                G_inv = G_inv_tensor.numpy()
+                    # mixed-precision Cholesky factorization and solves
+                    # factorize G_c (float32)
+                    L = torch.linalg.cholesky(G_c)
+                    # solve G_c @ alpha = r_c
+                    alpha = torch.cholesky_solve(r_c, L).squeeze(1)  # (n_c,)
+                else:
+                    X_c = None
+                    r_c = None
+                    L = None
+                    alpha = None
 
-            #print(f"K_c shape: {K_c.shape}, G_c shape: {G_c.shape}, G_inv shape: {G_inv.shape}")
-            
-            # Kernel vector between x_i and past contexts in cluster
-            k_i = np.array([self._kernel(x, self.contexts[i]) for x in X_c])
-            
-            # Predictive mean: k_i^T G_inv y_c
-            mean = k_i.dot(G_inv).dot(r_c)
-            
+            # If no data in cluster, return zero mean and unit variance
+            if prev_c is not None and n_c > 0:
+                # compute kernel vector between x_i and contexts on GPU
+                x_i = self.contexts_tensor[i].to(torch.float32)  # (d,) half->float32
+                k_vec = torch.exp(-((X_c - x_i).pow(2).sum(-1)) / (2 * self.gamma**2))  # (n_c,)
+
+                # predictive mean and std from Cholesky solve
+                mean = (alpha * k_vec).sum().item()
+                v = torch.cholesky_solve(k_vec.unsqueeze(1), L).squeeze(1)  # (n_c,)
+                var = 1.0 - (k_vec * v).sum().item()
+                std = math.sqrt(max(var, 0.0))
+            else:
+                mean = 0.0
+                std = 1.0
+
             mean_list.append(mean)
-            
-            # Predictive variance: K(x_i,x_i) - k_i^T G_inv k_i
-            var = self._kernel(self.contexts[i], self.contexts[i]) - k_i.dot(G_inv).dot(k_i)
-            var = max(var, 0)  # Ensure non-negative variance
-            std = np.sqrt(var)
-            
             var_list.append(std)
-        
-            # Beta_t
-            log_det_term = np.log(1/self.delta * np.linalg.det(np.eye(n_c) + (1/self.lambda_) * K_c))
-            beta_t = self.B + np.sqrt(2*self.lambda_*self.B**2 + 2*(self.sigma**2)*log_det_term)
 
+            # Beta_t
+            # For the log_det_term, need K_c on CPU, but it's only used for confidence width
+            if prev_c is not None and n_c > 0:
+                # For log_det_term, move K_c to cpu and numpy if small
+                K_c_cpu = K_c.detach().cpu().numpy()
+                log_det_term = np.log(1/self.delta * np.linalg.det(np.eye(n_c) + (1/self.lambda_) * K_c_cpu))
+            else:
+                log_det_term = 0.0
+            beta_t = self.B + np.sqrt(2*self.lambda_*self.B**2 + 2*(self.sigma**2)*log_det_term)
             beta_t_list.append(beta_t)
             
             # UCB score
             ucb_scores[i] = mean + beta_t * std
 
         
-        print(f"UCB at time {t}: {np.round(ucb_scores, 2)}")
-        print(f"Means: {np.round(mean_list, 2)}")
-        print(f"Stds: {np.round(var_list, 2)}")
-        print(f"Beta_t: {np.round(beta_t_list, 2)}")
-        print(f"Selected arm: {np.argmax(ucb_scores)}")
+        logging.info(f"UCB at time {t}: {np.round(ucb_scores, 2)}")
+        logging.info(f"Means: {np.round(mean_list, 2)}")
+        logging.info(f"Stds: {np.round(var_list, 2)}")
+        logging.info(f"Beta_t: {np.round(beta_t_list, 2)}")
+        logging.info(f"Selected arm: {np.argmax(ucb_scores)}")
         
         return ucb_scores #int(np.argmax(ucb_scores))
     
@@ -364,7 +397,13 @@ class ClusteredKernelUCB:
 
 
 
-def run_ck_ucb(env, T):
+def run_ck_ucb(env, T, rep=None):
+
+    """
+    Run the CK-UCB algorithm for T rounds on the given environment.
+    """
+    if rep is not None:
+        logging.info(f"Replication {rep+1}: Starting CK-UCB run")
 
     learner = ClusteredKernelUCB(
         num_arms       = env.num_arms,  
@@ -393,6 +432,8 @@ def run_ck_ucb(env, T):
     for i in range(total_arms):
         c_, a_ = arm_to_cluster[i]
         r_     = env.feedback(c_, a_)
+        regret = delta[c_][a_]
+        logging.info(f"[Rep {rep+1}] Init t={i}, arm={i}, reward={r_:.4f}, regret={regret:.4f}")
         learner.update(i, r_)
         regret_list.append(delta[c_][a_])
 
@@ -402,6 +443,8 @@ def run_ck_ucb(env, T):
         chosen_arm = np.argmax(ucb_vals)
         c_, a_     = arm_to_cluster[chosen_arm]
         r_         = env.feedback(c_, a_)
+        regret = delta[c_][a_]
+        logging.info(f"[Rep {rep+1}] Main t={t}, pulled arm={chosen_arm}, reward={r_:.4f}, regret={regret:.4f}")
         learner.update(chosen_arm, r_)
         regret_list.append(delta[c_][a_])
 
@@ -415,10 +458,17 @@ def run_experiments(env, T, repeat):
     oracle_results = []
     ck_ucb_results    = []
 
-    for _ in (range(repeat)):
-        ucb_results.append(run_ucb(env, T).cumsum())
-        oracle_results.append(run_oracle_ucb(env, T).cumsum())
-        ck_ucb_results.append(run_ck_ucb(env, T).cumsum())
+    for rep in range(repeat):
+        logging.info(f"Starting replication {rep+1}/{repeat}")
+        results_ucb = run_ucb(env, T).cumsum()
+        logging.info(f"Finished standard UCB replication {rep+1}")
+        ucb_results.append(results_ucb)
+        results_oracle = run_oracle_ucb(env, T).cumsum()
+        logging.info(f"Finished Oracle UCB replication {rep+1}")
+        oracle_results.append(results_oracle)
+        results_ck = run_ck_ucb(env, T, rep).cumsum()
+        logging.info(f"Finished CK-UCB replication {rep+1}")
+        ck_ucb_results.append(results_ck)
 
     ucb_results    = np.array(ucb_results)
     oracle_results = np.array(oracle_results)
@@ -466,9 +516,18 @@ env = HeterogeneousClusterEnvironment(num_arms, contexts,
                                       theta_array, sigma_array,
                                       arm_dist_types)
 
-T       = 2000
-repeat  = 5
-results = run_experiments(env, T, repeat)
+T       = 10000
+repeat  = 20
+# Use automatic mixed precision for the heavy GPU linear algebra
+with torch.amp.autocast(device_type="cuda" if torch.cuda.is_available() else "cpu", 
+                        dtype=torch.bfloat16):
+    results = run_experiments(env, T, repeat)
+
+# Save experiment results dict
+results_path = os.path.join(log_dir, 'results.pkl')
+with open(results_path, 'wb') as f:
+    pickle.dump(results, f)
+logging.info(f"Saved results to {results_path}")
 
 
 plt.figure(figsize=(9, 6))
@@ -492,4 +551,8 @@ plt.ylabel("Cumulative Regret")
 plt.title("3.3: Cumulative Regret of UCB, UCB-C, and CK-UCB")
 plt.legend()
 plt.tight_layout()
+# Save the plot as PNG
+plot_path = os.path.join(log_dir, 'cumulative_regret.png')
+plt.savefig(plot_path)
+logging.info(f"Saved plot to {plot_path}")
 plt.show()

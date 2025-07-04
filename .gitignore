@@ -2,6 +2,7 @@
 # Python cache files
 __pycache__/
 
+runs/
 
 test.ipynb
 
