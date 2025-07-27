@@ -1,3 +1,5 @@
+from datetime import datetime
+import os
 import numpy as np
 import math
 import matplotlib.pyplot as plt
@@ -311,7 +313,7 @@ class DepCluster:
         else:
             w_arr = exp_val/np.sum(exp_val)
 
-       
+
         dist_list = list(self.dist_family)  # e.g. ['gaussian', 'exponential', 'bernoulli']
         for i, dist_name in enumerate(dist_list):
             self.weights[dist_name] = w_arr[i]
@@ -319,20 +321,21 @@ class DepCluster:
         #TODO:DEBUG
         logging.info(f"[Cluster {self.cluster_id}] weights={self.weights}, sum={sum(self.weights.values())}")
 
-
-        
         best_dist_name, (best_bic, best_mean) = min(bic_map.items(), key=lambda x: x[1][0])
         self.best_distribution = best_dist_name
         self.empirical_mean = best_mean
 
 
-# Configure logging to write to a file
+experiment_name = "3_1"
+ts    = datetime.now().strftime("%Y%m%d_%H%M%S")
+logdir = os.path.join("runs", experiment_name, ts)
+os.makedirs(logdir, exist_ok=True)
 logging.basicConfig(
+    filename=os.path.join(logdir, "3_1.log"),
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    filename='experiment_3_1.log',
-    filemode='w'  # 'w' overwrites the file for each new run
+    format="%(asctime)s %(levelname)s: %(message)s"
 )
+logging.info(f"Experiment: {experiment_name}")
 
 num_arms = [3,2,3]
 theta_array = [0.1, 0.5, 0.3]
@@ -355,7 +358,6 @@ config = Config()
 config.F = ['gaussian','exponential','bernoulli']  # candidate distributions
 config.sigma = 1.0
 
-
 all_reg_bic = []
 for _ in range(repeat):
     bandit = DependentBandit(config, testbed.environment)
@@ -368,8 +370,6 @@ avg_bic, ub_bic, lb_bic = stats(all_reg_bic)
 plt.figure(figsize=(9, 6))
 x_axis = np.arange(1, T + 1)
 
-avg_regret_ucb, ub_regret_ucb, lb_regret_ucb = testbed.ucb_perf_percentile(T, repeat)
-avg_regret_ucbc, ub_regret_ucbc, lb_regret_ucbc = testbed.ucb_c_perf_percentile(T, repeat)
 
 plt.plot(x_axis, avg_ucb, 'b-', label="Standard UCB")
 plt.fill_between(x_axis, lb_ucb, ub_ucb, color='blue', alpha=0.15)
