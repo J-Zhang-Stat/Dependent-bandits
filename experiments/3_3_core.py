@@ -2,7 +2,10 @@
 
 import os
 import pickle
+import json
+import sys
 import logging
+
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
@@ -133,18 +136,27 @@ def main(config):
     logging.info(f"   Vars: {[c.vars for c in env.clusters]}")
     logging.info(f"   Arm types: {[c.dist_types for c in env.clusters]}")
     
-    # 3) Run
-    results = run_experiments(env, config["T"], config["repeat"])
+    # 3) Run w/ amp
+    logging.info(f"Running experiments on device: {device.upper()} with AMP dtype: {amp_dtype}")
+    with torch.amp.autocast(device_type=device, dtype=amp_dtype):
+        results = run_experiments(env, config["T"], config["repeat"])
+        
     # 4) Save
     with open(os.path.join(logdir, "results.pkl"), "wb") as f:
         pickle.dump(results, f)
     logging.info("Results saved")
+    
     # 5) Plot
     x = np.arange(1, config["T"]+1)
-    plt.figure(figsize=(9,6))
-    for label, color in [("ucb","b"),("oracle","r"),("ck-ucb","g")]:
+    plt.figure(figsize=(8,5))
+    plot_map = {
+            "ucb": ("Standard UCB", "b"),
+            "oracle": ("Oracle", "r"),
+            "ck-ucb": ("CK-UCB", "g")
+        }
+    for label, (plot_label, color) in plot_map.items():
         avg, ub, lb = stats(results[label])
-        plt.plot(x, avg, color, label=label)
+        plt.plot(x, avg, color, label=plot_label)
         plt.fill_between(x, lb, ub, alpha=0.2, color=color)
     plt.xlabel("t")
     plt.ylabel("Cumulative Regret")
@@ -158,9 +170,12 @@ def main(config):
     plot_path = os.path.join(logdir, "cumulative_regret.png")
     plt.savefig(plot_path)
     logging.info(f"Plot saved to {plot_path}")
-    plt.show()
+    #plt.show()
 
 if __name__ == "__main__":
-    import json, sys
+    # --- AMP Setup ---
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    amp_dtype = torch.bfloat16
+    
     cfg = json.load(open(sys.argv[1], "r"))
     main(cfg)

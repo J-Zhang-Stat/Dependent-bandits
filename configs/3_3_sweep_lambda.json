@@ -1,0 +1,29 @@
+{
+  "experiment_name": "ckucb_3.3_sweep_lambda",
+  "num_arms": [3, 2, 3],
+  "contexts": [
+    [1, 0.2, 0], [1, 0.4, 0], [1, 0.6, 0],
+    [0, 0.7, 0.1], [0, 0.8, 0.2],
+    [0.2, 0.8, 1], [0.3, 0.7, 1], [0.4, 0.6, 1]
+  ],
+  "theta_array": [[0.6,0.5,0.4], [0.5,0.4], [0.4,0.3,0.2]],
+  "sigma_array": [1, 1, 1],
+  "arm_dist_types": [
+    ["gaussian", "bernoulli", "exponential"],
+    ["bernoulli", "gaussian"],
+    ["exponential", "gaussian", "bernoulli"]
+  ],
+  "T": 5000,
+  "repeat": 20,
+  "ck_params": {
+    "lambda_": 0.2,
+    "gamma": 1.0,
+    "B": 1.0,
+    "sigma": 1.0,
+    "delta": 0.1
+  },
+  "sweep": {
+    "param": "lambda_",
+    "values": [0.05, 0.1, 0.2, 0.5, 1]
+  }
+}

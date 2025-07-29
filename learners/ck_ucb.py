@@ -10,13 +10,13 @@ class ClusteredKernelUCB:
     A simple implementation of the Clustered Kernel-UCB algorithm (CK-UCB).
     Each cluster maintains its own kernel-ridge regressor to estimate the mean and uncertainty.
     """
-    def __init__(self, num_arms, contexts, lambda_=1.0, gamma=1.0, B=1.0, sigma=1.0, delta=0.1):
+    def __init__(self, num_arms, contexts, lambda_=0.2, gamma=1.0, B=1.0, sigma=1.0, delta=0.1):
         """
         :param contexts: np.ndarray, shape (n_arms, d) – feature vectors x_i for each arm
         :param num_arms: array-like, length n_arms – cluster assignment C(i) for each arm i e.g.([3,2,2] 3 clusters, 7 total)
-        :param lambda_: float – regularization parameter (λ)
+        :param lambda_: float – ridge regularization parameter (λ)
         :param gamma: float – bandwidth parameter for Gaussian kernel
-        :param B: float – RKHS norm bound
+        :param B: float – RKHS norm bound, ||θ^* _k || <=B for all clusters k 
         :param sigma: float – sub-Gaussian noise parameter
         :param delta: float – confidence level parameter
         """
@@ -56,7 +56,8 @@ class ClusteredKernelUCB:
         
     def _gaussian_kernel(self, x1, x2):
         """Gaussian (RBF) kernel."""
-        return np.exp(-np.linalg.norm(x1 - x2)**2 / (2 * self.gamma**2))
+        #return np.exp(-np.linalg.norm(x1 - x2)**2 / (2 * self.gamma**2))
+        raise NotImplementedError("Kernel function should not be called directly. Use select_arm() instead.")
     
     def select_arm(self, t):
         """
