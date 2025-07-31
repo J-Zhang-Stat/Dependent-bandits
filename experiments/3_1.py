@@ -1,39 +1,72 @@
-from datetime import datetime
-import os
+import random
 import numpy as np
 import math
 import matplotlib.pyplot as plt
-import logging
+from utils import stats
 
-from environment.candidates import GaussianFixedVarCandidate, ExponentialCandidate, BernoulliCandidate
-from environment.normal_cluster import NormalClusterEnvironment
-from experiments.utils import stats
+np.random.seed(42)
+random.seed(42)
+class NormalCluster:
+    def __init__(self, num, theta, sigma =1):
+        self.num = num
+        self.theta = theta
+        self.sigma = sigma
+        
+    def feedback(self, arm):
+        if arm >= self.num:
+            print("NormalCluster.feedback: index out of num_arms within the cluster")
+            return None
+        reward = random.gauss(self.theta, self.sigma)
+        return reward
+    
+    def payoff(self):
+        return np.ones(self.num) * self.theta
+
+class NormalClusterEnvironment:
+    def __init__(self, num_arms, theta_array, sigma_array):
+        if len(num_arms) != len(theta_array):
+            print("num of clusters doesn't match")
+        self.num_cluster = len(num_arms)
+        self.theta_array = theta_array
+        self.num_arms = num_arms
+        self.sigma_array = sigma_array
+        self.clusters = []
+        for i in range(self.num_cluster):
+            self.clusters.append(NormalCluster(num_arms[i],theta_array[i],sigma_array[i]))
+    
+    def regret_per_action(self):
+        payoffs = [c.payoff() for c in self.clusters]
+        largest = np.max([np.max(p) for p in payoffs])
+        delta = [largest - p for p in payoffs]
+        return delta
+        
+    def feedback(self, cluster, arm):
+        return self.clusters[cluster].feedback(arm)
 
 
 class NormalClusterLearner:
     def __init__(self, num, sigma=1):
         self.num = num
         self.sigma = sigma
-        self.obs_avg = np.array([0.0 for _ in range(num)])
-        self.obs_cnt = np.array([0 for _ in range(num)])
-        self.scale = np.array(range(num)) + 1
+        self.obs_avg = np.zeros(num)
+        self.obs_cnt = np.zeros(num, dtype=int)
         
     def receive_feedback(self, arm, reward):
         if arm >= self.num:
-            logging.warning("NormalClusterLearner.receive_feedback: index out of num_arms within the cluster")
+            print("NormalClusterLearner.receive_feedback: index out of num_arms within the cluster")
             return
         self.obs_avg[arm] = (self.obs_avg[arm] * self.obs_cnt[arm] + reward)/(self.obs_cnt[arm] + 1)
         self.obs_cnt[arm] += 1
         
     def clear_obs(self):
-        self.obs_avg = np.array([0.0 for _ in range(self.num)])
-        self.obs_cnt = np.array([0 for _ in range(self.num)])
+        self.obs_avg = np.zeros(self.num)
+        self.obs_cnt = np.zeros(self.num, dtype=int)
         
     def mle(self):
-        denom = np.sum(self.scale * self.obs_cnt)
-        if denom <= 0:
+        total_cnt = np.sum(self.obs_cnt)
+        if total_cnt <= 0:
             return 0.0
-        return np.sum(self.obs_avg * self.obs_cnt) / denom
+        return np.sum(self.obs_avg * self.obs_cnt) / total_cnt
     
     def explore_bonus(self, t):
         return np.log(t+1)  
@@ -49,18 +82,18 @@ class NormalClusterLearner:
     
     def ucb_c(self, t):
         est = self.mle()
-        sum_cnt_scale2 = np.sum(self.obs_cnt * (self.scale**2))
-        if sum_cnt_scale2 <= 0:
+        sum_cnt = np.sum(self.obs_cnt)
+        if sum_cnt <= 0:
             ci = float('inf')
         else:
-            ci = np.sqrt(2*self.sigma*self.sigma*self.explore_bonus(t)/sum_cnt_scale2)
+            ci = np.sqrt(2*self.sigma*self.sigma*self.explore_bonus(t)/sum_cnt)
         upb = est + ci
-        return upb * self.scale
+        return np.ones(self.num) * upb
 
 class NormalClusterTestBed:
     def __init__(self, num_arms, theta_array, sigma_array):
         if len(num_arms) != len(theta_array):
-            logging.error("num of clusters doesn't match")
+            print("num of clusters doesn't match")
         self.num_cluster = len(num_arms)
         self.theta_array = theta_array
         self.num_arms = num_arms
@@ -122,10 +155,8 @@ class NormalClusterTestBed:
         sem = all_regrets.std(axis=0, ddof=1) / np.sqrt(all_regrets.shape[0])
         z = 1.96
         lb_regret = avg_regret - z * sem
-        ub_regret = avg_regret + z * sem        
-
+        ub_regret = avg_regret + z * sem  
         return avg_regret, ub_regret, lb_regret
-    
 
     def ucb_c_perf_percentile(self, T, repeat):
         all_regrets = []
@@ -138,7 +169,7 @@ class NormalClusterTestBed:
         sem = all_regrets.std(axis=0, ddof=1) / np.sqrt(all_regrets.shape[0])
         z = 1.96
         lb_regret = avg_regret - z * sem
-        ub_regret = avg_regret + z * sem
+        ub_regret = avg_regret + z * sem 
         return avg_regret, ub_regret, lb_regret
 
 
@@ -156,7 +187,8 @@ class DependentBandit:
             c_obj = DepCluster(
                 cluster_id=c_id,
                 sigma=self.config.sigma,
-                dist_family=self.config.F
+                dist_family=self.config.F,
+                num_arms=environment.num_arms[c_id]
             )
             self.clusters.append(c_obj)
 
@@ -176,8 +208,10 @@ class DependentBandit:
             
             for c in self.clusters:
                 c.compute_BIC_scores(self.config)
+
             
             chosen_cluster = self.select_cluster(t)
+            
             chosen_arm = self.select_arm_in_cluster(chosen_cluster, t)
             
             r = self.env.feedback(chosen_cluster.cluster_id, chosen_arm)
@@ -196,6 +230,7 @@ class DependentBandit:
 
         return np.array(self.regret_history)
 
+
     def select_cluster(self, t):
         best_c = None
         best_val = -1e9
@@ -206,11 +241,6 @@ class DependentBandit:
             expl = math.sqrt(1.7*math.log(t+1)/c.N)*(1-avg_w)
             # UCB: c.empirical_mean + expl
             val = c.empirical_mean + expl
-            
-            # TODO:DEBUG
-            logging.info(f" t={t}, cluster={c.cluster_id}, N={c.N}, emp_mean={c.empirical_mean:.4f}, "
-                  f"avg_w={avg_w:.4f}, expl={expl:.4f}, val={val:.4f}")
-            
             if val>best_val:
                 best_val = val
                 best_c = c
@@ -218,24 +248,117 @@ class DependentBandit:
 
     def select_arm_in_cluster(self, cluster, t):
         best_arm = None
-        best_val = -1e9
+        min_pulls = float('inf')
         c_id = cluster.cluster_id
         arm_cnt = self.env.num_arms[c_id]
 
         for arm_id in range(arm_cnt):
-            n_arm = cluster.arm_N.get(arm_id,0)
-            mean_arm = cluster.arm_mean.get(arm_id, cluster.empirical_mean)
-            if n_arm==0:
-                return arm_id
-            bonus = math.sqrt(1.7*math.log(t+1)/n_arm)
-            val = mean_arm + bonus
-            logging.info(f"   arm={arm_id}, n_arm={n_arm}, mean_arm={mean_arm:.4f}, bonus={bonus:.4f}, val={val:.4f}")
-            if val>best_val:
-                best_val = val
+            n_arm = cluster.arm_N.get(arm_id, 0)
+            if n_arm < min_pulls:
+                min_pulls = n_arm
                 best_arm = arm_id
         return best_arm
+class SubGaussianCandidate:
+    def fit_MLE(self, data):
+        raise NotImplementedError
+    
+    def loglik(self, data):
+        raise NotImplementedError
+    
+    def get_mean(self):
+        raise NotImplementedError
+    
+    def get_num_params(self):
+        raise NotImplementedError
 
+class GaussianFixedVarCandidate(SubGaussianCandidate):
+  
+    def __init__(self, sigma=1.0):
+        self.sigma = sigma
+        self.mu_hat = 0.0
+        self.n_params = 1  
 
+    def fit_MLE(self, data):
+        """
+        data: np.array([...])
+        """
+        if len(data)==0:
+            self.mu_hat = 0.0
+        else:
+            self.mu_hat = np.mean(data)
+    
+    def loglik(self, data):
+        n = len(data)
+        if n==0:
+            return 0.0
+        s = self.sigma
+        cst = -0.5*n*math.log(2*math.pi*s*s)
+        sq = - np.sum((data - self.mu_hat)**2)/(2*s*s)
+        ll = cst + sq
+        return ll
+    
+    def get_mean(self):
+        return self.mu_hat
+    
+    def get_num_params(self):
+        return self.n_params
+
+class ExponentialCandidate(SubGaussianCandidate):
+
+    def __init__(self):
+        self.lam_hat = 1.0
+        self.n_params = 1
+
+    def fit_MLE(self, data):
+        n = len(data)
+        if n==0:
+            self.lam_hat = 1.0
+        else:
+            sum_data = np.sum(data)
+            if sum_data < 1e-12:
+                sum_data = 1e-12
+            self.lam_hat = n / sum_data
+
+    def loglik(self, data):
+        n = len(data)
+        if n==0:
+            return 0.0
+        lam = self.lam_hat
+        return n*math.log(lam) - lam*np.sum(data)
+
+    def get_mean(self):
+        return 1.0 / self.lam_hat
+    
+    def get_num_params(self):
+        return self.n_params
+
+class BernoulliCandidate(SubGaussianCandidate):
+    def __init__(self):
+        self.p_hat = 0.5
+        self.n_params = 1
+
+    def fit_MLE(self, data):
+        if len(data)==0:
+            self.p_hat = 0.5
+        else:
+            mean_ = np.mean(data)
+            
+            mean_ = min(max(mean_,1e-12),1-1e-12)
+            self.p_hat = mean_
+
+    def loglik(self, data):
+        n = len(data)
+        if n==0:
+            return 0.0
+        p = self.p_hat
+        ll = np.sum(data * np.log(p) + (1 - data) * np.log(1 - p))
+        return ll
+
+    def get_mean(self):
+        return self.p_hat
+
+    def get_num_params(self):
+        return self.n_params
 CANDIDATE_REGISTRY = {
     'gaussian': GaussianFixedVarCandidate,
     'exponential': ExponentialCandidate,
@@ -246,15 +369,15 @@ CANDIDATE_REGISTRY = {
 
 class DepCluster:
 
-    def __init__(self, cluster_id, sigma, dist_family):
+    def __init__(self, cluster_id, sigma, dist_family, num_arms):
         self.cluster_id = cluster_id
         self.sigma = sigma
         self.dist_family = dist_family
+        self.num_arms = num_arms
 
         self.data = []
         self.N = 0
         self.weights = {dist_name: 1.0/len(dist_family) for dist_name in dist_family}
-        self.best_distribution = None
         self.empirical_mean = 0.0
 
         self.arm_N = {}
@@ -264,7 +387,6 @@ class DepCluster:
         self.data.clear()
         self.N = 0
         self.weights = {dist_name: 1.0/len(self.dist_family) for dist_name in self.dist_family}
-        self.best_distribution = None
         self.empirical_mean = 0.0
         self.arm_N.clear()
         self.arm_mean.clear()
@@ -273,11 +395,11 @@ class DepCluster:
    
         n = len(self.data)
         if n == 0:
-            self.best_distribution = None
             self.empirical_mean = 0.0
             return
 
         data_arr = np.array(self.data)
+
         
         bic_map = {}
 
@@ -297,59 +419,36 @@ class DepCluster:
     
             bic_map[dist_name] = (bic_val, candidate.get_mean())
 
-
-
         all_bic = np.array([val[0] for val in bic_map.values()])
         min_bic = np.min(all_bic)
         exp_val = np.exp(-4.993*(all_bic - min_bic))
-        
-        # TODO: DEBUG
-        logging.info(f"[Cluster {self.cluster_id}] n={n}, bic_map={bic_map}")
-        logging.info(f"[Cluster {self.cluster_id}] all_bic={all_bic}, min_bic={min_bic}")
-        logging.info(f"[Cluster {self.cluster_id}] exp_val={exp_val}, sum_exp={np.sum(exp_val)}")
-        
         if np.sum(exp_val)==0 or np.isnan(exp_val).any() or np.isinf(exp_val).any():
             w_arr = np.ones_like(exp_val)/len(exp_val)
         else:
             w_arr = exp_val/np.sum(exp_val)
 
-
+       
         dist_list = list(self.dist_family)  # e.g. ['gaussian', 'exponential', 'bernoulli']
         for i, dist_name in enumerate(dist_list):
             self.weights[dist_name] = w_arr[i]
 
-        #TODO:DEBUG
-        logging.info(f"[Cluster {self.cluster_id}] weights={self.weights}, sum={sum(self.weights.values())}")
-
-        best_dist_name, (best_bic, best_mean) = min(bic_map.items(), key=lambda x: x[1][0])
-        self.best_distribution = best_dist_name
-        self.empirical_mean = best_mean
+        mean_list = [bic_map[dist_name][1] for dist_name in dist_list]
+        self.empirical_mean = np.dot(w_arr, mean_list)
 
 
-experiment_name = "3_1"
-ts    = datetime.now().strftime("%Y%m%d_%H%M%S")
-logdir = os.path.join("runs", experiment_name, ts)
-os.makedirs(logdir, exist_ok=True)
-logging.basicConfig(
-    filename=os.path.join(logdir, "3_1.log"),
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s: %(message)s"
-)
-logging.info(f"Experiment: {experiment_name}")
-
-num_arms = [3,2,3]
-theta_array = [0.1, 0.5, 0.3]
+num_arms = [2,5,2]
+theta_array = [0.1, 0.5, 0.2]
 sigma_array = [1,1,1]
 
 
 T = 10000
-repeat = 50
+repeat = 30
 plt_sample = range(1,T+1,int(T/20))
 
 # 1) UCB & UCB-C with NormalClusterTestBed
 testbed = NormalClusterTestBed(num_arms, theta_array, sigma_array)
-avg_ucb, ub_ucb, lb_ucb = testbed.ucb_perf_percentile(T, repeat)
-avg_ucbc, ub_ucbc, lb_ucbc = testbed.ucb_c_perf_percentile(T, repeat)
+avg_regret_ucb, ub_regret_ucb, lb_regret_ucb = testbed.ucb_perf_percentile(T, repeat)
+avg_regret_ucbc, ub_regret_ucbc, lb_regret_ucbc = testbed.ucb_c_perf_percentile(T, repeat)
 
 # 2) DependentBandit(BIC-UCB)
 class Config:
@@ -357,6 +456,7 @@ class Config:
 config = Config()
 config.F = ['gaussian','exponential','bernoulli']  # candidate distributions
 config.sigma = 1.0
+
 
 all_reg_bic = []
 for _ in range(repeat):
@@ -367,25 +467,31 @@ all_reg_bic = np.array(all_reg_bic)
 avg_bic, ub_bic, lb_bic = stats(all_reg_bic)
 
 
-plt.figure(figsize=(9, 6))
-x_axis = np.arange(1, T + 1)
+# UCB
+plt.plot(plt_sample, [avg_regret_ucb[i-1] for i in plt_sample], 'b-', label='UCB')
+plt.fill_between(np.arange(T), ub_regret_ucb, lb_regret_ucb, color='blue', alpha=0.2)
 
+# UCB-C
+plt.plot(plt_sample, [avg_regret_ucbc[i-1] for i in plt_sample], 'r-', label='UCB-C')
+plt.fill_between(np.arange(T), ub_regret_ucbc, lb_regret_ucbc, color='red', alpha=0.2)
 
-plt.plot(x_axis, avg_ucb, 'b-', label="Standard UCB")
-plt.fill_between(x_axis, lb_ucb, ub_ucb, color='blue', alpha=0.15)
+# BIC-UCB 
+plt.plot(plt_sample, [avg_bic[i-1] for i in plt_sample], 'g-', label='BIC-UCB w/ same f')
+plt.fill_between(np.arange(T), ub_bic, lb_bic, color='green', alpha=0.2)
 
-plt.plot(x_axis, avg_ucbc, 'r-', label="UCB-C")
-plt.fill_between(x_axis, lb_ucbc, ub_ucbc, color='red', alpha=0.15)
-
-plt.plot(x_axis, avg_bic, 'g-', label="BIC-UCB")
-plt.fill_between(x_axis, lb_bic, ub_bic, color='green', alpha=0.15)
-
-
-plt.legend()
-plt.xlabel('Time')
-plt.ylabel('Cumulative Regret')
-plt.title('Section 3.1')
+plt.legend(fontsize=12)
+plt.xlabel('Time', fontsize=14)
+plt.ylabel('Cumulative Regret', fontsize=14)
+plt.title('Section 3.1', fontsize=14)
 plt.tight_layout()
 plt.show()
+auc_ucb = np.trapezoid(avg_regret_ucb)
+auc_ucbc = np.trapezoid(avg_regret_ucbc)
+auc_bic = np.trapezoid(avg_bic)
 
-plt.savefig("runs/3.1_plot.png")
+print("AUC for UCB mean curve:", auc_ucb)
+print("AUC for UCB-C mean curve:", auc_ucbc)
+print("AUC for BIC-UCB mean curve:", auc_bic)
+print("Regret mean for UCB after 10000 steps:", avg_regret_ucb[-1])
+print("Regret mean for UCB-C after 10000 steps:", avg_regret_ucbc[-1])
+print("Regret mean for BIC-UCB after 10000 steps:", avg_bic[-1])
