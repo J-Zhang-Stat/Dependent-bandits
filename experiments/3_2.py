@@ -1,5 +1,7 @@
 import numpy as np
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as pltimport random
+np.random.seed(42)
+random.seed(42)
 
 from learners import UCBLearner, OracleUCBLearner, BICUCBLearner
 from environment.candidates import GaussianFixedVarCandidate, ExponentialCandidate, BernoulliCandidate
@@ -194,3 +196,13 @@ plt.tight_layout()
 plt.show()
 
 plt.savefig("runs/3.2_plot.png")
+auc_ucb = np.trapezoid(avg_ucb)
+auc_ucbc = np.trapezoid(avg_oracle)
+auc_bic = np.trapezoid(avg_bic)
+
+print("AUC for UCB mean curve:", auc_ucb)
+print("AUC for UCB-C mean curve:", auc_ucbc)
+print("AUC for BIC-UCB mean curve:", auc_bic)
+print("Regret mean for UCB after 10000 steps:", avg_ucb[-1])
+print("Regret mean for UCB-C after 10000 steps:", avg_oracle[-1])
+print("Regret mean for BIC-UCB after 10000 steps:", avg_bic[-1])
