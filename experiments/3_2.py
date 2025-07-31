@@ -168,7 +168,7 @@ env = HeterogeneousClusterEnvironment(num_arms, theta_array, sigma_array,
                                         arm_dist_types, contexts=None)
 
 T       = 10000    
-repeat  = 50        
+repeat  = 30      
 results = run_experiments(env, T, repeat)
 
 
